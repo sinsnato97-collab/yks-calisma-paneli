@@ -7394,11 +7394,12 @@
 <section class="cloud-modal" id="cloudModal" aria-hidden="true" aria-label="Bulut kayıt">
   <div class="cloud-card" role="dialog" aria-modal="true" aria-labelledby="cloudTitle">
     <button class="cloud-close" id="cloudClose" type="button" aria-label="Kapat">×</button>
-    <span class="eyebrow">E-posta yok</span>
-    <h2 id="cloudTitle">Kodla bulut kayıt</h2>
+    <span class="eyebrow">Her cihazda aynı kayıt</span>
+    <h2 id="cloudTitle">Bulut eşitleme</h2>
     <p class="cloud-description">
-      Firebase projesini bir kez bağla. Sonra oluşturduğun gizli kodla verilerini buluta kaydet
-      ve aynı kodu başka cihazda girerek geri yükle.
+      Bu site senin Firebase projene ve bulut koduna hazır bağlı. Hangi cihazda açarsan aç aynı buluta
+      kendiliğinden bağlanır; değişikliklerin birkaç saniye içinde buluta yazılır, diğer cihazdaki
+      değişiklikler de site açıldığında ya da sekmeye geri döndüğünde gelir.
     </p>
 
     <section class="cloud-box" id="cloudConfigBox">
@@ -7435,8 +7436,10 @@
     </section>
 
     <section class="cloud-box cloud-hidden" id="cloudSyncBox">
-      <strong>3. Kayıt</strong>
-      <p>Notlar dahil tüm YKS verileri bu kodla şifrelenerek kaydedilir.</p>
+      <strong>Eşitleme</strong>
+      <p>Notlar dahil tüm YKS verileri bu kodla şifrelenerek kaydedilir. İki cihazda farklı bölümleri
+        (örneğin birinde takvimi, diğerinde denemeleri) değiştirirsen ikisi de korunur; aynı bölümü
+        iki cihazda aynı anda değiştirirsen son eşitlenen geçerli olur.</p>
 
       <div class="cloud-status-grid">
         <div class="cloud-status-item">
@@ -7450,15 +7453,15 @@
       </div>
 
       <div class="cloud-actions">
-        <button class="cloud-button primary" id="cloudUpload" type="button">Şimdi buluta kaydet</button>
-        <button class="cloud-button" id="cloudDownload" type="button">Buluttan geri yükle</button>
+        <button class="cloud-button primary" id="cloudUpload" type="button">Şimdi eşitle</button>
+        <button class="cloud-button" id="cloudDownload" type="button">Buluttakini bu cihaza yükle</button>
         <button class="cloud-button danger" id="cloudDisconnect" type="button">Kodu ayır</button>
       </div>
 
       <label class="cloud-auto-row">
         <span>
-          <strong>Otomatik bulut kaydı</strong>
-          <span>Değişiklik olursa yaklaşık 20 saniyede yükler.</span>
+          <strong>Otomatik eşitleme</strong>
+          <span>Açık kalsın: değişiklikleri yaklaşık 10 saniyede buluta yazar, diğer cihazdakileri alır.</span>
         </span>
         <input id="cloudAutoSync" type="checkbox">
       </label>
@@ -7523,14 +7526,40 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.17.0/firebase-app.js";
-import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.17.0/firebase-firestore.js";
+import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.17.0/firebase-firestore.js";
 
 (() => {
+  // v28 · Siteye gömülü Firebase projesi ve bulut kodu.
+  // Her cihaz açılışta bu buluta kendiliğinden bağlanır ve eşitlenir.
+  const EMBEDDED_FIREBASE_CONFIG = {
+    apiKey: "AIzaSyDgo0Q9O7Re57BhDB7ScYnYQBKCSsHrtEk",
+    authDomain: "ykscalisma2027.firebaseapp.com",
+    projectId: "ykscalisma2027",
+    storageBucket: "ykscalisma2027.firebasestorage.app",
+    messagingSenderId: "33453054284",
+    appId: "1:33453054284:web:3aaffc2894b6058ecd97e9"
+  };
+  const EMBEDDED_CLOUD_CODE = "MTGF-22K8-H35N-JDRM-RY5E-K9XE";
+
   const CONFIG_KEY = "yks-cloud-firebase-config-v18";
   const CODE_KEY = "yks-cloud-code-v20";
   const AUTO_KEY = "yks-cloud-auto-v20";
   const LOCAL_TIME_KEY = "yks-cloud-local-time-v20";
-  const ARMED_PREFIX = "yks-cloud-armed-v20:";
+  const CODE_OFF_KEY = "yks-cloud-code-off-v28";
+  const BASE_PREFIX = "yks-cloud-base-v28:";
+  const RELOAD_GUARD_KEY = "yks-cloud-reload-v28";
+  const COLLECTION = "yksCloudCodes";
+  const AUTO_INTERVAL_MS = 10000;
+  const REMOTE_CHECK_MS = 180000;
+
+  // Bu cihaza özel ekran durumu: eşitlenmez, aksi hâlde her tıklama bulut yüklemesi tetiklerdi.
+  const DEVICE_LOCAL_KEYS = new Set([
+    "yks-ui-state-v17",
+    "yks-stopwatch-state-v16",
+    "yks-calendar-last-selected-v16",
+    "yks-practice-last-subject-v15",
+    "yks-practice-last-month-v14"
+  ]);
 
   const launcher = document.getElementById("cloudLauncher");
   const modal = document.getElementById("cloudModal");
@@ -7547,7 +7576,7 @@ import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.
   const connectButton = document.getElementById("cloudConnectCode");
   const connectedCodeNode = document.getElementById("cloudConnectedCode");
   const syncBox = document.getElementById("cloudSyncBox");
-  const uploadButton = document.getElementById("cloudUpload");
+  const syncButton = document.getElementById("cloudUpload");
   const downloadButton = document.getElementById("cloudDownload");
   const disconnectButton = document.getElementById("cloudDisconnect");
   const autoSync = document.getElementById("cloudAutoSync");
@@ -7556,17 +7585,45 @@ import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.
   const messageNode = document.getElementById("cloudMessage");
 
   let firebaseConfig = null;
-  let firebaseApp = null;
   let firestore = null;
   let cloudIdentity = null;
   let remoteMeta = null;
   let busy = false;
-  let lastFingerprint = "";
 
   window.__yksFirebaseModuleReady = true;
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
+  // ---------- Anahtar sınıfları ----------
+  function isInternalCloudKey(key) {
+    return String(key).startsWith("yks-cloud-");
+  }
+
+  function isSyncKey(key) {
+    const name = String(key);
+    return name.startsWith("yks-") && !isInternalCloudKey(name) && !DEVICE_LOCAL_KEYS.has(name);
+  }
+
+  // Yerel değişiklik saatini yalnızca eşitlenen veriler değişince güncelle.
+  const nativeSetItem = Storage.prototype.setItem;
+  const nativeRemoveItem = Storage.prototype.removeItem;
+
+  function markLocalChange() {
+    try { nativeSetItem.call(localStorage, LOCAL_TIME_KEY, String(Date.now())); } catch {}
+    setTimeout(updateTimes, 0);
+  }
+
+  Storage.prototype.setItem = function(key, value) {
+    nativeSetItem.call(this, key, value);
+    if (this === localStorage && isSyncKey(key)) markLocalChange();
+  };
+
+  Storage.prototype.removeItem = function(key) {
+    nativeRemoveItem.call(this, key);
+    if (this === localStorage && isSyncKey(key)) markLocalChange();
+  };
+
+  // ---------- Pencere ----------
   function openModal() {
     modal.classList.add("is-open");
     modal.setAttribute("aria-hidden", "false");
@@ -7596,35 +7653,34 @@ import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.
     messageNode.className = "cloud-message";
   }
 
+  // ---------- Firebase ayarı ----------
+  function isValidConfig(value) {
+    return Boolean(value?.apiKey && value?.projectId && value?.appId);
+  }
+
   function parseConfig(text) {
     const value = String(text || "").trim();
     if (!value) throw new Error("Firebase config boş.");
-
     try {
       const parsed = JSON.parse(value);
-      if (parsed?.apiKey && parsed?.projectId && parsed?.appId) return parsed;
+      if (isValidConfig(parsed)) return parsed;
     } catch {}
-
     const keys = ["apiKey", "authDomain", "projectId", "storageBucket", "messagingSenderId", "appId", "measurementId"];
     const result = {};
     for (const key of keys) {
       const match = value.match(new RegExp(`${key}\\s*:\\s*["']([^"']+)["']`));
       if (match) result[key] = match[1];
     }
-
-    if (!result.apiKey || !result.projectId || !result.appId) {
-      throw new Error("Config okunamadı. apiKey, projectId ve appId bulunmalı.");
-    }
+    if (!isValidConfig(result)) throw new Error("Config okunamadı. apiKey, projectId ve appId bulunmalı.");
     return result;
   }
 
   function loadConfig() {
     try {
-      const parsed = JSON.parse(localStorage.getItem(CONFIG_KEY));
-      return parsed?.apiKey && parsed?.projectId && parsed?.appId ? parsed : null;
-    } catch {
-      return null;
-    }
+      const saved = JSON.parse(localStorage.getItem(CONFIG_KEY));
+      if (isValidConfig(saved)) return saved;
+    } catch {}
+    return EMBEDDED_FIREBASE_CONFIG;
   }
 
   saveConfigButton.addEventListener("click", () => {
@@ -7639,19 +7695,18 @@ import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.
   });
 
   forgetConfigButton.addEventListener("click", () => {
-    if (!confirm("Firebase proje ayarı bu cihazdan silinsin mi? Çalışma verilerin silinmez.")) return;
+    if (!confirm("Bu cihazdaki özel Firebase ayarı silinsin mi? Site gömülü ayara döner; çalışma verilerin silinmez.")) return;
     localStorage.removeItem(CONFIG_KEY);
-    localStorage.removeItem(CODE_KEY);
     location.reload();
   });
 
+  // ---------- Kod ve şifreleme ----------
   function normalizeCode(value) {
     return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   }
 
   function formatCode(value) {
-    const normalized = normalizeCode(value);
-    return normalized.match(/.{1,4}/g)?.join("-") || "";
+    return normalizeCode(value).match(/.{1,4}/g)?.join("-") || "";
   }
 
   function createCode() {
@@ -7663,9 +7718,7 @@ import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.
     return formatCode(code);
   }
 
-  codeInput.addEventListener("input", () => {
-    codeInput.value = formatCode(codeInput.value);
-  });
+  codeInput.addEventListener("input", () => { codeInput.value = formatCode(codeInput.value); });
 
   generateButton.addEventListener("click", () => {
     codeInput.value = createCode();
@@ -7702,36 +7755,20 @@ import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.
 
   async function sha256Hex(value) {
     const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
-    return Array.from(new Uint8Array(digest))
-      .map(byte => byte.toString(16).padStart(2, "0"))
-      .join("");
+    return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("");
   }
 
   async function deriveIdentity(code) {
     const normalized = normalizeCode(code);
     if (normalized.length !== 24) throw new Error("Kod 24 karakter olmalı.");
-
-    const material = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(normalized),
-      "PBKDF2",
-      false,
-      ["deriveKey"]
-    );
-
+    const material = await crypto.subtle.importKey("raw", encoder.encode(normalized), "PBKDF2", false, ["deriveKey"]);
     const key = await crypto.subtle.deriveKey(
-      {
-        name: "PBKDF2",
-        salt: encoder.encode(`yks-cloud-v20:${firebaseConfig.projectId}`),
-        iterations: 160000,
-        hash: "SHA-256"
-      },
+      { name: "PBKDF2", salt: encoder.encode(`yks-cloud-v20:${firebaseConfig.projectId}`), iterations: 160000, hash: "SHA-256" },
       material,
       { name: "AES-GCM", length: 256 },
       false,
       ["encrypt", "decrypt"]
     );
-
     return {
       formattedCode: formatCode(normalized),
       documentId: await sha256Hex(`yks:${firebaseConfig.projectId}:${normalized}`),
@@ -7741,291 +7778,334 @@ import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.
 
   async function encryptPayload(payload) {
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encrypted = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      cloudIdentity.key,
-      encoder.encode(JSON.stringify(payload))
-    );
-    return {
-      iv: toBase64(iv),
-      ciphertext: toBase64(new Uint8Array(encrypted))
-    };
+    const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, cloudIdentity.key, encoder.encode(JSON.stringify(payload)));
+    return { iv: toBase64(iv), ciphertext: toBase64(new Uint8Array(encrypted)) };
   }
 
   async function decryptPayload(record) {
     try {
-      const decrypted = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: fromBase64(record.iv) },
-        cloudIdentity.key,
-        fromBase64(record.ciphertext)
-      );
+      const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64(record.iv) }, cloudIdentity.key, fromBase64(record.ciphertext));
       return JSON.parse(decoder.decode(decrypted));
     } catch {
       throw new Error("Bulut verisi açılamadı. Kod farklı olabilir.");
     }
   }
 
-  function isInternalCloudKey(key) {
-    return key === CONFIG_KEY ||
-      key === CODE_KEY ||
-      key === AUTO_KEY ||
-      key === LOCAL_TIME_KEY ||
-      key.startsWith(ARMED_PREFIX);
-  }
-
+  // ---------- Veri, özet ve eşitleme tabanı ----------
   function collectData() {
     const result = {};
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      if (!key || !key.startsWith("yks-") || isInternalCloudKey(key)) continue;
-      result[key] = localStorage.getItem(key);
+      if (key && isSyncKey(key)) result[key] = localStorage.getItem(key);
     }
     return result;
   }
 
-  function fingerprint(payload = collectData()) {
-    return JSON.stringify(Object.keys(payload).sort().map(key => [key, payload[key]]));
+  function filterPayload(payload) {
+    const result = {};
+    if (!payload || typeof payload !== "object") return result;
+    for (const [key, value] of Object.entries(payload)) {
+      if (isSyncKey(key) && typeof value === "string") result[key] = value;
+    }
+    return result;
   }
 
+  function hashString(text) {
+    const value = String(text);
+    let h1 = 0xdeadbeef ^ value.length;
+    let h2 = 0x41c6ce57 ^ value.length;
+    for (let i = 0; i < value.length; i++) {
+      const ch = value.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return `${value.length}:${(h2 >>> 0).toString(16)}${(h1 >>> 0).toString(16)}`;
+  }
+
+  function hashMap(payload) {
+    const result = {};
+    for (const [key, value] of Object.entries(payload)) result[key] = hashString(value);
+    return result;
+  }
+
+  function sameHashes(a, b) {
+    const aKeys = Object.keys(a || {});
+    const bKeys = Object.keys(b || {});
+    if (aKeys.length !== bKeys.length) return false;
+    return aKeys.every(key => b[key] === a[key]);
+  }
+
+  function baseKey() {
+    return cloudIdentity ? BASE_PREFIX + cloudIdentity.documentId : "";
+  }
+
+  function loadBase() {
+    try {
+      const value = JSON.parse(localStorage.getItem(baseKey()));
+      return value && typeof value.hashes === "object" && value.hashes ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveBase(time, hashes) {
+    try { localStorage.setItem(baseKey(), JSON.stringify({ time, hashes })); } catch {}
+  }
+
+  function hasUnsyncedLocalChanges() {
+    const base = loadBase();
+    if (!base) return true;
+    return !sameHashes(hashMap(collectData()), base.hashes);
+  }
+
+  function applyToLocal(payload) {
+    const current = collectData();
+    for (const key of Object.keys(current)) {
+      if (!(key in payload)) localStorage.removeItem(key);
+    }
+    for (const [key, value] of Object.entries(payload)) {
+      if (current[key] !== value) localStorage.setItem(key, value);
+    }
+  }
+
+  function reloadAfterSync() {
+    let last = 0;
+    try { last = Number(sessionStorage.getItem(RELOAD_GUARD_KEY)) || 0; } catch {}
+    if (Date.now() - last < 15000) {
+      showMessage("Buluttaki yeni veriler alındı. Görmek için sayfayı yenile.", "success");
+      return;
+    }
+    try { sessionStorage.setItem(RELOAD_GUARD_KEY, String(Date.now())); } catch {}
+    location.reload();
+  }
+
+  // ---------- Görünüm ----------
   function formatTime(timestamp) {
     if (!timestamp) return "—";
-    return new Date(Number(timestamp)).toLocaleString("tr-TR", {
-      day: "numeric",
-      month: "short",
-      hour: "2-digit",
-      minute: "2-digit"
-    });
+    return new Date(Number(timestamp)).toLocaleString("tr-TR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   }
 
   function updateTimes() {
     localTimeNode.textContent = formatTime(localStorage.getItem(LOCAL_TIME_KEY));
-    remoteTimeNode.textContent = remoteMeta?.updatedAtClient
-      ? formatTime(remoteMeta.updatedAtClient)
-      : "Bulutta kayıt yok";
-  }
-
-  function armedKey() {
-    return cloudIdentity ? `${ARMED_PREFIX}${cloudIdentity.documentId}` : "";
-  }
-
-  function isArmed() {
-    return cloudIdentity && localStorage.getItem(armedKey()) === "1";
-  }
-
-  function arm() {
-    if (cloudIdentity) localStorage.setItem(armedKey(), "1");
+    remoteTimeNode.textContent = remoteMeta?.updatedAtClient ? formatTime(remoteMeta.updatedAtClient) : "Bulutta kayıt yok";
   }
 
   function setBusy(value) {
     busy = value;
-    [saveConfigButton, generateButton, connectButton, uploadButton, downloadButton, disconnectButton]
+    [saveConfigButton, generateButton, connectButton, syncButton, downloadButton, disconnectButton]
       .forEach(button => { if (button) button.disabled = value; });
   }
 
   function renderState() {
-    const configured = Boolean(firebaseConfig);
+    const configured = Boolean(firebaseConfig && firestore);
     configBox.classList.toggle("cloud-hidden", configured);
     codeBox.classList.toggle("cloud-hidden", !configured);
     syncBox.classList.toggle("cloud-hidden", !cloudIdentity);
     connectedCodeNode.classList.toggle("cloud-hidden", !cloudIdentity);
     stateDot.classList.toggle("is-connected", Boolean(cloudIdentity));
-
     if (cloudIdentity) {
       connectedCodeNode.textContent = cloudIdentity.formattedCode;
       codeInput.value = cloudIdentity.formattedCode;
     }
   }
 
+  // ---------- Bulut okuma / yazma ----------
   async function readRemote() {
     if (!cloudIdentity || !firestore) return null;
-    const snapshot = await getDoc(doc(firestore, "yksCloudCodes", cloudIdentity.documentId));
+    // Önbellek yerine sunucudan oku: çevrimdışıyken eski kayda göre karar verilmesin.
+    const snapshot = await getDocFromServer(doc(firestore, COLLECTION, cloudIdentity.documentId));
     remoteMeta = snapshot.exists() ? snapshot.data() : null;
     updateTimes();
     return remoteMeta;
   }
 
-  async function connectCode(code, silent = false) {
-    if (!firebaseConfig || !firestore) return showMessage("Önce Firebase projesini bağla.", "error");
+  async function writeRemote(payload) {
+    const encrypted = await encryptPayload(payload);
+    const now = Date.now();
+    await setDoc(doc(firestore, COLLECTION, cloudIdentity.documentId), {
+      version: 20,
+      ciphertext: encrypted.ciphertext,
+      iv: encrypted.iv,
+      updatedAt: serverTimestamp(),
+      updatedAtClient: now
+    });
+    remoteMeta = { ...encrypted, version: 20, updatedAtClient: now };
+    updateTimes();
+    return now;
+  }
+
+  // Üç yönlü eşitleme: son ortak durum (taban), bu cihaz ve bulut karşılaştırılır.
+  // Bu cihazda değişen bölümler buluta, bulutta değişen bölümler bu cihaza geçer.
+  async function syncNow({ manual = false } = {}) {
+    if (!cloudIdentity || !firestore || busy) return;
+    setBusy(true);
+    try {
+      const remote = await readRemote();
+      const hasRemote = Boolean(remote?.ciphertext && remote?.iv);
+      const remoteTime = Number(remote?.updatedAtClient) || 0;
+      const base = loadBase();
+      const local = collectData();
+      const localHashes = hashMap(local);
+
+      let merged = local;
+      let remoteHashes = null;
+
+      if (hasRemote && base && remoteTime === base.time) {
+        // Bulut, bu cihazın son eşitlemesinden beri değişmedi.
+        remoteHashes = base.hashes;
+      } else if (hasRemote) {
+        const remoteData = filterPayload(await decryptPayload(remote));
+        remoteHashes = hashMap(remoteData);
+        if (!base) {
+          // Bu cihazda ilk eşitleme: ortak bölümlerde bulut geçerli, yalnız burada olanlar korunur.
+          merged = { ...local, ...remoteData };
+        } else {
+          merged = { ...remoteData };
+          const keys = new Set([...Object.keys(localHashes), ...Object.keys(base.hashes)]);
+          for (const key of keys) {
+            if (localHashes[key] === base.hashes[key]) continue;
+            if (key in local) merged[key] = local[key];
+            else delete merged[key];
+          }
+        }
+      }
+
+      const mergedHashes = hashMap(merged);
+      const needsUpload = hasRemote
+        ? !sameHashes(remoteHashes, mergedHashes)
+        : Object.keys(merged).length > 0;
+      const needsLocalApply = !sameHashes(localHashes, mergedHashes);
+
+      let newTime = remoteTime;
+      if (needsUpload) newTime = await writeRemote(merged);
+
+      // Eşitleme sürerken bu cihazda yeni bir değişiklik yapıldıysa üzerine yazma;
+      // taban güncellenmez, bir sonraki turda yeniden birleştirilir.
+      if (!sameHashes(hashMap(collectData()), localHashes)) return;
+
+      saveBase(newTime, mergedHashes);
+      if (manual) showMessage(needsLocalApply ? "Eşitlendi. Diğer cihazdaki değişiklikler alınıyor…" : "Eşitlendi. Bu cihaz ve bulut aynı.", "success");
+      else if (messageNode.classList.contains("error")) clearMessage();
+
+      if (needsLocalApply) {
+        applyToLocal(merged);
+        reloadAfterSync();
+      }
+    } catch (error) {
+      const offline = navigator.onLine === false || /offline|unavailable|network/i.test(String(error?.code || error?.message));
+      showMessage(offline
+        ? "Şu an buluta ulaşılamıyor. Kayıtların bu cihazda duruyor; bağlantı gelince otomatik eşitlenir."
+        : (error.message || "Eşitleme başarısız."), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function forceDownload() {
+    if (!cloudIdentity || !firestore || busy) return;
+    setBusy(true);
+    try {
+      const remote = await readRemote();
+      if (!remote?.ciphertext || !remote?.iv) {
+        showMessage("Bulutta henüz kayıt yok.", "error");
+        return;
+      }
+      const payload = filterPayload(await decryptPayload(remote));
+      if (!confirm("Buluttaki kayıt bu cihazdaki YKS verilerinin yerini alacak. Devam edilsin mi?")) return;
+      applyToLocal(payload);
+      saveBase(Number(remote.updatedAtClient) || 0, hashMap(payload));
+      showMessage("Bulut kaydı alındı. Site yeniden açılıyor…", "success");
+      setTimeout(() => location.reload(), 650);
+    } catch (error) {
+      showMessage(error.message || "Buluttan yükleme başarısız.", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function connectCode(code, { silent = false } = {}) {
+    if (!firebaseConfig || !firestore) return showMessage("Firebase bağlantısı kurulamadı.", "error");
     setBusy(true);
     try {
       cloudIdentity = await deriveIdentity(code);
       localStorage.setItem(CODE_KEY, cloudIdentity.formattedCode);
+      localStorage.removeItem(CODE_OFF_KEY);
       renderState();
-      const remote = await readRemote();
-
-      if (!remote && !silent) {
-        showMessage("Kod bağlandı. İlk kaydı oluşturmak için “Şimdi buluta kaydet” de.", "success");
-      } else if (remote && !isArmed() && !silent) {
-        showMessage("Bu kodda bulut kaydı var. İlk kullanımda doğru yönü seç: buluta kaydet veya buluttan geri yükle.");
-      } else if (!silent) {
-        showMessage("Bulut kodu bağlandı.", "success");
-      }
     } catch (error) {
       cloudIdentity = null;
       renderState();
       showMessage(error.message || "Kod bağlanamadı.", "error");
+      return;
     } finally {
       setBusy(false);
     }
+    if (autoSync.checked || !silent) await syncNow({ manual: !silent });
   }
 
   connectButton.addEventListener("click", () => connectCode(codeInput.value));
   codeInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") connectCode(codeInput.value);
   });
-
-  async function upload(automatic = false) {
-    if (!cloudIdentity || !firestore || busy) return;
-    const payload = collectData();
-    const currentFingerprint = fingerprint(payload);
-    if (automatic && currentFingerprint === lastFingerprint) return;
-
-    setBusy(true);
-    try {
-      const encrypted = await encryptPayload(payload);
-      const now = Date.now();
-
-      await setDoc(doc(firestore, "yksCloudCodes", cloudIdentity.documentId), {
-        version: 20,
-        ciphertext: encrypted.ciphertext,
-        iv: encrypted.iv,
-        updatedAt: serverTimestamp(),
-        updatedAtClient: now
-      });
-
-      remoteMeta = { ...encrypted, version: 20, updatedAtClient: now };
-      lastFingerprint = currentFingerprint;
-      localStorage.setItem(LOCAL_TIME_KEY, String(now));
-      arm();
-      updateTimes();
-      if (!automatic) showMessage("Verilerin şifrelenerek buluta kaydedildi.", "success");
-    } catch (error) {
-      if (!automatic) showMessage(error.message || "Buluta kayıt başarısız.", "error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function download() {
-    if (!cloudIdentity || !firestore || busy) return;
-    setBusy(true);
-    try {
-      const remote = await readRemote();
-      if (!remote?.ciphertext || !remote?.iv) {
-        showMessage("Bu kodda henüz bulut kaydı yok.", "error");
-        return;
-      }
-
-      const payload = await decryptPayload(remote);
-      if (!confirm("Buluttaki kayıt bu cihazdaki YKS verilerinin yerini alacak. Devam edilsin mi?")) return;
-
-      const deleteKeys = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith("yks-") && !isInternalCloudKey(key)) deleteKeys.push(key);
-      }
-      deleteKeys.forEach(key => localStorage.removeItem(key));
-
-      for (const [key, value] of Object.entries(payload)) {
-        if (key.startsWith("yks-") && !isInternalCloudKey(key) && typeof value === "string") {
-          localStorage.setItem(key, value);
-        }
-      }
-
-      localStorage.setItem(CODE_KEY, cloudIdentity.formattedCode);
-      localStorage.setItem(LOCAL_TIME_KEY, String(remote.updatedAtClient || Date.now()));
-      arm();
-      showMessage("Bulut kaydı alındı. Site yeniden açılıyor…", "success");
-      setTimeout(() => location.reload(), 650);
-    } catch (error) {
-      showMessage(error.message || "Buluttan geri yükleme başarısız.", "error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  uploadButton.addEventListener("click", () => upload(false));
-  downloadButton.addEventListener("click", download);
+  syncButton.addEventListener("click", () => syncNow({ manual: true }));
+  downloadButton.addEventListener("click", forceDownload);
 
   disconnectButton.addEventListener("click", () => {
     if (!confirm("Bulut kodu bu cihazdan ayrılsın mı? Buluttaki kayıt silinmez.")) return;
     localStorage.removeItem(CODE_KEY);
+    localStorage.setItem(CODE_OFF_KEY, "1");
     cloudIdentity = null;
     remoteMeta = null;
     codeInput.value = "";
     renderState();
     updateTimes();
-    showMessage("Kod bu cihazdan ayrıldı.", "success");
+    showMessage("Kod bu cihazdan ayrıldı. Yeniden bağlanmak için kodu yazıp “Kodu bağla” de.", "success");
   });
 
-  autoSync.checked = localStorage.getItem(AUTO_KEY) === "1";
+  // Otomatik eşitleme varsayılan olarak açık; yalnızca kullanıcı kapatırsa kapalı kalır.
+  autoSync.checked = localStorage.getItem(AUTO_KEY) !== "0";
   autoSync.addEventListener("change", () => {
     localStorage.setItem(AUTO_KEY, autoSync.checked ? "1" : "0");
-    if (autoSync.checked && cloudIdentity && !isArmed()) {
-      showMessage("İlk eşitlemede önce manuel olarak buluta kaydet veya buluttan geri yükle.");
-    }
+    if (autoSync.checked) syncNow();
   });
 
-  const nativeSetItem = Storage.prototype.setItem;
-  const nativeRemoveItem = Storage.prototype.removeItem;
-
-  Storage.prototype.setItem = function(key, value) {
-    nativeSetItem.call(this, key, value);
-    if (this === localStorage && String(key).startsWith("yks-") && !isInternalCloudKey(String(key))) {
-      nativeSetItem.call(this, LOCAL_TIME_KEY, String(Date.now()));
-      setTimeout(updateTimes, 0);
-    }
-  };
-
-  Storage.prototype.removeItem = function(key) {
-    nativeRemoveItem.call(this, key);
-    if (this === localStorage && String(key).startsWith("yks-") && !isInternalCloudKey(String(key))) {
-      nativeSetItem.call(this, LOCAL_TIME_KEY, String(Date.now()));
-      setTimeout(updateTimes, 0);
-    }
-  };
+  setInterval(() => {
+    if (cloudIdentity && !busy && autoSync.checked && hasUnsyncedLocalChanges()) syncNow();
+  }, AUTO_INTERVAL_MS);
 
   setInterval(() => {
-    if (
-      cloudIdentity &&
-      !busy &&
-      autoSync.checked &&
-      isArmed() &&
-      fingerprint() !== lastFingerprint
-    ) {
-      upload(true);
-    }
-  }, 20000);
+    if (cloudIdentity && !busy && autoSync.checked && document.visibilityState === "visible") syncNow();
+  }, REMOTE_CHECK_MS);
+
+  document.addEventListener("visibilitychange", () => {
+    if (!cloudIdentity || !autoSync.checked) return;
+    // Sekmeye dönünce diğer cihazdakileri al; ayrılırken bekleyen değişikliği gönder.
+    if (document.visibilityState === "visible" || hasUnsyncedLocalChanges()) syncNow();
+  });
+
+  window.addEventListener("online", () => {
+    if (cloudIdentity && autoSync.checked) syncNow();
+  });
 
   async function init() {
     clearMessage();
     firebaseConfig = loadConfig();
-
-    if (!firebaseConfig) {
+    configInput.value = JSON.stringify(firebaseConfig, null, 2);
+    try {
+      const app = initializeApp(firebaseConfig, "yksCloudV28");
+      firestore = getFirestore(app);
+    } catch {
+      firestore = null;
       renderState();
+      showMessage("Firebase bağlantısı başlatılamadı.", "error");
       return;
     }
 
-    configInput.value = JSON.stringify(firebaseConfig, null, 2);
-
-    try {
-      firebaseApp = initializeApp(firebaseConfig, "yksCloudV20");
-      firestore = getFirestore(firebaseApp);
-
-      const savedCode = localStorage.getItem(CODE_KEY);
-      if (savedCode) {
-        await connectCode(savedCode, true);
-        if (remoteMeta?.ciphertext) {
-          lastFingerprint = fingerprint();
-        }
-      } else {
-        renderState();
-      }
-    } catch (error) {
-      firebaseConfig = null;
-      renderState();
-      showMessage("Firebase bağlantısı başlatılamadı. Proje ayarını yeniden gir.", "error");
-    }
+    let code = localStorage.getItem(CODE_KEY);
+    if (!code && localStorage.getItem(CODE_OFF_KEY) !== "1") code = EMBEDDED_CLOUD_CODE;
+    if (code) await connectCode(code, { silent: true });
+    else renderState();
   }
 
   updateTimes();
