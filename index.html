@@ -5156,10 +5156,13 @@
     const focusHistoryList = document.getElementById("focusHistoryList");
     const focusSessionDay = document.getElementById("focusSessionDay");
 
-    const STOPWATCH_STORAGE_KEY = "yks-stopwatch-state-v16";
+    // v28 · Kronometre cihazlar arasında ortak: başlangıç anı gerçek saatle saklanır,
+    // böylece çalışırken kayıt hiç değişmez ve diğer cihaz aynı süreyi hesaplar.
+    const STOPWATCH_STORAGE_KEY = "yks-stopwatch-shared-v28";
+    const STOPWATCH_LEGACY_KEY = "yks-stopwatch-state-v16";
     const STOPWATCH_HISTORY_KEY = "yks-stopwatch-daily-history-v17";
-    let elapsedMilliseconds = 0;
-    let startedAt = 0;
+    let elapsedMilliseconds = 0; // Önceki çalışma parçalarının toplamı
+    let runningSince = 0;        // Çalışıyorsa başlatıldığı an (Date.now)
     let animationFrame = null;
     let isRunning = false;
     let stopwatchSessionDateKey = null;
@@ -5267,61 +5270,75 @@
 
     function getCurrentStopwatchElapsed() {
       return isRunning
-        ? elapsedMilliseconds + Math.max(0, performance.now() - startedAt)
+        ? elapsedMilliseconds + Math.max(0, Date.now() - runningSince)
         : elapsedMilliseconds;
+    }
+
+    function serializeStopwatchState() {
+      return JSON.stringify({
+        v: 2,
+        accumulatedMs: Math.max(0, Math.round(elapsedMilliseconds)),
+        runningSince: isRunning ? runningSince : null,
+        sessionDateKey: stopwatchSessionDateKey
+      });
     }
 
     function saveStopwatchState() {
       try {
-        const currentElapsed = isRunning
-          ? elapsedMilliseconds + Math.max(0, performance.now() - startedAt)
-          : elapsedMilliseconds;
-        localStorage.setItem(STOPWATCH_STORAGE_KEY, JSON.stringify({
-          elapsedMilliseconds: currentElapsed,
-          isRunning,
-          savedAt: Date.now(),
-          sessionDateKey: stopwatchSessionDateKey
-        }));
+        const value = serializeStopwatchState();
+        // Değişmediyse yazma: çalışan kronometre her saniye bulut yüklemesi tetiklemesin.
+        if (localStorage.getItem(STOPWATCH_STORAGE_KEY) !== value) {
+          localStorage.setItem(STOPWATCH_STORAGE_KEY, value);
+        }
       } catch {}
     }
 
-    function restoreStopwatchState() {
-      try {
-        const saved = JSON.parse(localStorage.getItem(STOPWATCH_STORAGE_KEY));
-        if (!saved || typeof saved !== "object") {
-          stopwatchSessionDateKey = null;
-          renderStopwatch(0);
-          updateStopwatchSessionDayLabel();
-          renderStopwatchHistory();
-          return;
-        }
+    function readStoredStopwatchState() {
+      const saved = JSON.parse(localStorage.getItem(STOPWATCH_STORAGE_KEY));
+      if (saved && typeof saved === "object" && saved.v === 2) return saved;
+      // Eski biçimden tek seferlik taşıma.
+      const legacy = JSON.parse(localStorage.getItem(STOPWATCH_LEGACY_KEY));
+      if (!legacy || typeof legacy !== "object") return null;
+      return {
+        v: 2,
+        accumulatedMs: Math.max(0, Number(legacy.elapsedMilliseconds) || 0),
+        runningSince: legacy.isRunning ? (Number(legacy.savedAt) || Date.now()) : null,
+        sessionDateKey: legacy.sessionDateKey || null
+      };
+    }
 
-        elapsedMilliseconds = Math.max(0, Number(saved.elapsedMilliseconds) || 0);
-        stopwatchSessionDateKey = saved.sessionDateKey || (elapsedMilliseconds > 0 ? localDateKey() : null);
-        updateStopwatchSessionDayLabel();
-        renderStopwatchHistory();
-
-        if (saved.isRunning) {
-          const timeAway = Math.max(0, Date.now() - (Number(saved.savedAt) || Date.now()));
-          elapsedMilliseconds += timeAway;
-          isRunning = true;
-          startedAt = performance.now();
-          focusStatus.textContent = "Çalışıyor";
-          startButton.textContent = "Devam ediyor";
-          renderStopwatch(elapsedMilliseconds);
-          animationFrame = requestAnimationFrame(stopwatchLoop);
-        } else {
-          isRunning = false;
-          renderStopwatch(elapsedMilliseconds);
-          focusStatus.textContent = elapsedMilliseconds > 0 ? "Duraklatıldı" : "Hazır";
-          startButton.textContent = elapsedMilliseconds > 0 ? "Devam et" : "Başlat";
-        }
-      } catch {
-        stopwatchSessionDateKey = null;
-        renderStopwatch(0);
-        updateStopwatchSessionDayLabel();
-        renderStopwatchHistory();
+    function updateStopwatchButtons(statusText) {
+      if (isRunning) {
+        focusStatus.textContent = statusText || "Çalışıyor";
+        startButton.textContent = "Devam ediyor";
+      } else {
+        focusStatus.textContent = statusText || (elapsedMilliseconds > 0 ? "Duraklatıldı" : "Hazır");
+        startButton.textContent = elapsedMilliseconds > 0 ? "Devam et" : "Başlat";
       }
+    }
+
+    // Kayıttan durumu kurar. Diğer cihazdan değişiklik gelince de tekrar çağrılır.
+    function restoreStopwatchState(statusText) {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = null;
+      let saved = null;
+      try { saved = readStoredStopwatchState(); } catch {}
+
+      elapsedMilliseconds = Math.max(0, Number(saved?.accumulatedMs) || 0);
+      const since = Number(saved?.runningSince) || 0;
+      isRunning = since > 0;
+      runningSince = isRunning ? since : 0;
+      stopwatchSessionDateKey = saved?.sessionDateKey || (isRunning || elapsedMilliseconds > 0 ? localDateKey() : null);
+
+      updateStopwatchSessionDayLabel();
+      renderStopwatchHistory();
+      renderStopwatch(getCurrentStopwatchElapsed());
+      updateStopwatchButtons(statusText);
+      if (isRunning) animationFrame = requestAnimationFrame(stopwatchLoop);
+    }
+
+    function requestCloudSync() {
+      window.dispatchEvent(new Event("yks-cloud-sync-request"));
     }
 
     function formatStopwatch(milliseconds) {
@@ -5343,9 +5360,9 @@
       timerPreview.textContent = formatted.main;
     }
 
-    function stopwatchLoop(now) {
+    function stopwatchLoop() {
       if (!isRunning) return;
-      renderStopwatch(elapsedMilliseconds + (now - startedAt));
+      renderStopwatch(getCurrentStopwatchElapsed());
       animationFrame = requestAnimationFrame(stopwatchLoop);
     }
 
@@ -5356,23 +5373,25 @@
         updateStopwatchSessionDayLabel();
       }
       isRunning = true;
-      startedAt = performance.now();
-      focusStatus.textContent = "Çalışıyor";
-      startButton.textContent = "Devam ediyor";
+      runningSince = Date.now();
+      updateStopwatchButtons();
+      cancelAnimationFrame(animationFrame);
       animationFrame = requestAnimationFrame(stopwatchLoop);
       saveStopwatchState();
+      requestCloudSync();
     }
 
     function stopStopwatch() {
       if (!isRunning) return;
-      elapsedMilliseconds += performance.now() - startedAt;
+      elapsedMilliseconds += Math.max(0, Date.now() - runningSince);
       isRunning = false;
+      runningSince = 0;
       cancelAnimationFrame(animationFrame);
       animationFrame = null;
       renderStopwatch();
-      focusStatus.textContent = "Duraklatıldı";
-      startButton.textContent = "Devam et";
+      updateStopwatchButtons();
       saveStopwatchState();
+      requestCloudSync();
     }
 
     function resetStopwatch() {
@@ -5380,6 +5399,7 @@
       const recordDateKey = stopwatchSessionDateKey || localDateKey();
 
       isRunning = false;
+      runningSince = 0;
       cancelAnimationFrame(animationFrame);
       animationFrame = null;
 
@@ -5390,14 +5410,28 @@
       }
 
       elapsedMilliseconds = 0;
-      startedAt = 0;
       stopwatchSessionDateKey = null;
       renderStopwatch(0);
       updateStopwatchSessionDayLabel();
-      focusStatus.textContent = durationToSave > 0 ? "Günlük süre kaydedildi" : "Hazır";
-      startButton.textContent = "Başlat";
+      updateStopwatchButtons(durationToSave > 0 ? "Günlük süre kaydedildi" : "Hazır");
       saveStopwatchState();
+      requestCloudSync();
     }
+
+    // Diğer cihazdan (bulut) ya da aynı cihazdaki başka sekmeden gelen kronometre değişikliği.
+    function handleExternalStopwatchChange(keys) {
+      if (keys.includes(STOPWATCH_STORAGE_KEY)) restoreStopwatchState();
+      else if (keys.includes(STOPWATCH_HISTORY_KEY)) renderStopwatchHistory();
+    }
+
+    window.addEventListener("yks-cloud-applied", (event) => {
+      handleExternalStopwatchChange(event.detail?.keys || []);
+    });
+
+    window.addEventListener("storage", (event) => {
+      if (event.key === null) restoreStopwatchState();
+      else handleExternalStopwatchChange([event.key]);
+    });
 
     async function openFocusMode() {
       renderStopwatchHistory();
@@ -5465,8 +5499,13 @@
     updateCountdown();
     setInterval(updateCountdown, 1000);
     restoreStopwatchState();
-    setInterval(() => { if (isRunning) saveStopwatchState(); }, 1000);
-    window.addEventListener("pagehide", saveStopwatchState);
+    // Yalnızca eski biçimde gerçekten süre varsa yeni biçimde yaz; boş bir durumu
+    // açılışta yazmak, diğer cihazda çalışan kronometrenin üzerine yazabilirdi.
+    try {
+      if (localStorage.getItem(STOPWATCH_STORAGE_KEY) === null && (isRunning || elapsedMilliseconds > 0)) {
+        saveStopwatchState();
+      }
+    } catch {}
     initializeTopics();
   </script>
 
@@ -7526,7 +7565,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.17.0/firebase-app.js";
-import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.17.0/firebase-firestore.js";
+import { getFirestore, doc, setDoc, getDocFromServer, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.17.0/firebase-firestore.js";
 
 (() => {
   // v28 · Siteye gömülü Firebase projesi ve bulut kodu.
@@ -7553,12 +7592,18 @@ import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "ht
   const REMOTE_CHECK_MS = 180000;
 
   // Bu cihaza özel ekran durumu: eşitlenmez, aksi hâlde her tıklama bulut yüklemesi tetiklerdi.
+  // (Kronometre artık ortak: yks-stopwatch-shared-v28 eşitlenir; eski v16 kaydı cihaza özeldi.)
   const DEVICE_LOCAL_KEYS = new Set([
     "yks-ui-state-v17",
     "yks-stopwatch-state-v16",
     "yks-calendar-last-selected-v16",
     "yks-practice-last-subject-v15",
     "yks-practice-last-month-v14"
+  ]);
+  // Bu bölümler diğer cihazdan gelince sayfa yenilenmeden anında uygulanır.
+  const LIVE_KEYS = new Set([
+    "yks-stopwatch-shared-v28",
+    "yks-stopwatch-daily-history-v17"
   ]);
 
   const launcher = document.getElementById("cloudLauncher");
@@ -7589,6 +7634,8 @@ import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "ht
   let cloudIdentity = null;
   let remoteMeta = null;
   let busy = false;
+  let pendingSync = false;
+  let stopListening = null;
 
   window.__yksFirebaseModuleReady = true;
   const encoder = new TextEncoder();
@@ -7862,11 +7909,24 @@ import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "ht
 
   function applyToLocal(payload) {
     const current = collectData();
+    const changed = [];
     for (const key of Object.keys(current)) {
-      if (!(key in payload)) localStorage.removeItem(key);
+      if (!(key in payload)) { localStorage.removeItem(key); changed.push(key); }
     }
     for (const [key, value] of Object.entries(payload)) {
-      if (current[key] !== value) localStorage.setItem(key, value);
+      if (current[key] !== value) { localStorage.setItem(key, value); changed.push(key); }
+    }
+    return changed;
+  }
+
+  // Gelen değişiklik yalnızca kronometreyle ilgiliyse sayfayı yenilemeden uygula.
+  function applyRemoteChanges(payload) {
+    const changed = applyToLocal(payload);
+    if (!changed.length) return;
+    if (changed.every(key => LIVE_KEYS.has(key))) {
+      window.dispatchEvent(new CustomEvent("yks-cloud-applied", { detail: { keys: changed } }));
+    } else {
+      reloadAfterSync();
     }
   }
 
@@ -7989,10 +8049,7 @@ import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "ht
       if (manual) showMessage(needsLocalApply ? "Eşitlendi. Diğer cihazdaki değişiklikler alınıyor…" : "Eşitlendi. Bu cihaz ve bulut aynı.", "success");
       else if (messageNode.classList.contains("error")) clearMessage();
 
-      if (needsLocalApply) {
-        applyToLocal(merged);
-        reloadAfterSync();
-      }
+      if (needsLocalApply) applyRemoteChanges(merged);
     } catch (error) {
       const offline = navigator.onLine === false || /offline|unavailable|network/i.test(String(error?.code || error?.message));
       showMessage(offline
@@ -8000,7 +8057,37 @@ import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "ht
         : (error.message || "Eşitleme başarısız."), "error");
     } finally {
       setBusy(false);
+      if (pendingSync) {
+        pendingSync = false;
+        setTimeout(requestSync, 150);
+      }
     }
+  }
+
+  // Otomatik tetikleyiciler için: eşitleme sürüyorsa bitince bir tur daha yapılır.
+  function requestSync() {
+    if (!cloudIdentity || !firestore || !autoSync.checked) return;
+    if (busy) { pendingSync = true; return; }
+    syncNow();
+  }
+
+  // Bulut belgesini canlı dinle: başka cihaz yazınca birkaç saniye içinde buraya gelir.
+  function listenRemote() {
+    if (stopListening) { stopListening(); stopListening = null; }
+    if (!cloudIdentity || !firestore) return;
+    try {
+      stopListening = onSnapshot(
+        doc(firestore, COLLECTION, cloudIdentity.documentId),
+        (snapshot) => {
+          if (snapshot.metadata?.hasPendingWrites) return;
+          const data = snapshot.exists() ? snapshot.data() : null;
+          const time = Number(data?.updatedAtClient) || 0;
+          const base = loadBase();
+          if (data && (!base || time !== base.time)) requestSync();
+        },
+        () => {} // dinleme koparsa 3 dakikalık yoklama ve sekmeye dönüş yine çalışır
+      );
+    } catch {}
   }
 
   async function forceDownload() {
@@ -8033,6 +8120,7 @@ import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "ht
       localStorage.setItem(CODE_KEY, cloudIdentity.formattedCode);
       localStorage.removeItem(CODE_OFF_KEY);
       renderState();
+      listenRemote();
     } catch (error) {
       cloudIdentity = null;
       renderState();
@@ -8055,6 +8143,7 @@ import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "ht
     if (!confirm("Bulut kodu bu cihazdan ayrılsın mı? Buluttaki kayıt silinmez.")) return;
     localStorage.removeItem(CODE_KEY);
     localStorage.setItem(CODE_OFF_KEY, "1");
+    if (stopListening) { stopListening(); stopListening = null; }
     cloudIdentity = null;
     remoteMeta = null;
     codeInput.value = "";
@@ -8067,26 +8156,26 @@ import { getFirestore, doc, setDoc, getDocFromServer, serverTimestamp } from "ht
   autoSync.checked = localStorage.getItem(AUTO_KEY) !== "0";
   autoSync.addEventListener("change", () => {
     localStorage.setItem(AUTO_KEY, autoSync.checked ? "1" : "0");
-    if (autoSync.checked) syncNow();
+    if (autoSync.checked) requestSync();
   });
 
   setInterval(() => {
-    if (cloudIdentity && !busy && autoSync.checked && hasUnsyncedLocalChanges()) syncNow();
+    if (cloudIdentity && !busy && autoSync.checked && hasUnsyncedLocalChanges()) requestSync();
   }, AUTO_INTERVAL_MS);
 
   setInterval(() => {
-    if (cloudIdentity && !busy && autoSync.checked && document.visibilityState === "visible") syncNow();
+    if (cloudIdentity && autoSync.checked && document.visibilityState === "visible") requestSync();
   }, REMOTE_CHECK_MS);
 
   document.addEventListener("visibilitychange", () => {
     if (!cloudIdentity || !autoSync.checked) return;
     // Sekmeye dönünce diğer cihazdakileri al; ayrılırken bekleyen değişikliği gönder.
-    if (document.visibilityState === "visible" || hasUnsyncedLocalChanges()) syncNow();
+    if (document.visibilityState === "visible" || hasUnsyncedLocalChanges()) requestSync();
   });
 
-  window.addEventListener("online", () => {
-    if (cloudIdentity && autoSync.checked) syncNow();
-  });
+  window.addEventListener("online", requestSync);
+  // Kronometre başlat/durdur/sıfırla: 10 saniye beklemeden hemen gönder.
+  window.addEventListener("yks-cloud-sync-request", requestSync);
 
   async function init() {
     clearMessage();
